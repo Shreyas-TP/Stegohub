@@ -35,12 +35,14 @@ export const encodeLSB = async (imageDataUrl: string, message: string): Promise<
         }
 
         // Encode message into LSB of pixel values
-        for (let i = 0; i < binaryMessage.length; i++) {
+        let messageIndex = 0;
+        for (let i = 0; i < data.length && messageIndex < binaryMessage.length; i++) {
           // Skip alpha channel (every 4th byte)
-          if ((i + 1) % 4 === 0) continue;
+          if (i % 4 === 3) continue;
           
           // Replace LSB with message bit
-          data[i] = (data[i] & 0xFE) | parseInt(binaryMessage[i]);
+          data[i] = (data[i] & 0xFE) | parseInt(binaryMessage[messageIndex]);
+          messageIndex++;
         }
 
         ctx.putImageData(imageData, 0, 0);
@@ -78,7 +80,7 @@ export const decodeLSB = async (imageDataUrl: string): Promise<string> => {
         // Extract LSB from each pixel
         for (let i = 0; i < data.length; i++) {
           // Skip alpha channel
-          if ((i + 1) % 4 === 0) continue;
+          if (i % 4 === 3) continue;
           
           binaryMessage += (data[i] & 1).toString();
         }
