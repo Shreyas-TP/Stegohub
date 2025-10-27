@@ -1,10 +1,15 @@
 import { useState, useRef } from "react";
-import { Upload, Eye, Lock, CheckCircle2 } from "lucide-react";
+import { Upload, Eye, Lock, CheckCircle2, FileType } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { decodeLSB } from "@/utils/steganography";
+import { decodeMessage, StegoAlgorithm, FileFormat, getAcceptString } from "@/utils/steganography";
 import { generateHash } from "@/utils/crypto";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAuth } from "@/contexts/AuthContext";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 export const StegoDecoder = () => {
   const [image, setImage] = useState<string | null>(null);
@@ -12,8 +17,11 @@ export const StegoDecoder = () => {
   const [hash, setHash] = useState<string>("");
   const [isDecoding, setIsDecoding] = useState(false);
   const [verified, setVerified] = useState(false);
+  const [algorithm, setAlgorithm] = useState<StegoAlgorithm>(StegoAlgorithm.LSB);
+  const [fileFormat, setFileFormat] = useState<FileFormat>(FileFormat.IMAGE);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+  const { isAuthenticated, addHistoryEntry } = useAuth();
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -24,16 +32,33 @@ export const StegoDecoder = () => {
         setDecodedMessage("");
         setHash("");
         setVerified(false);
+        
+        // Auto-detect algorithm based on file type for audio files
+        if (fileFormat === FileFormat.AUDIO) {
+          const fileType = file.type.toLowerCase();
+          if (fileType.includes('audio')) {
+            // Default to AUDIO_PHASE for audio files
+            setAlgorithm(StegoAlgorithm.AUDIO_PHASE);
+          }
+        }
       };
       reader.readAsDataURL(file);
     }
   };
 
+  const handleFileFormatChange = (value: string) => {
+    setFileFormat(value as FileFormat);
+    setImage(null);
+    setDecodedMessage("");
+    setHash("");
+    setVerified(false);
+  };
+
   const handleDecode = async () => {
     if (!image) {
       toast({
-        title: "No image selected",
-        description: "Please upload an encoded image to extract the message.",
+        title: "Missing input",
+        description: "Please select an encoded file",
         variant: "destructive",
       });
       return;
@@ -42,8 +67,26 @@ export const StegoDecoder = () => {
     setIsDecoding(true);
     
     try {
-      // Decode message from image using LSB steganography
-      const message = await decodeLSB(image);
+      // For audio files, try both algorithms if the first one fails
+      let message;
+      if (fileFormat === FileFormat.AUDIO) {
+        try {
+          // First try with the selected algorithm
+          message = await decodeMessage(image, algorithm, fileFormat);
+        } catch (error) {
+          // If the first algorithm fails, try the other audio algorithm
+          const alternativeAlgorithm = algorithm === StegoAlgorithm.AUDIO_PHASE ? 
+            StegoAlgorithm.AUDIO_ECHO : StegoAlgorithm.AUDIO_PHASE;
+          
+          message = await decodeMessage(image, alternativeAlgorithm, fileFormat);
+          // Update the algorithm state to show which one worked
+          setAlgorithm(alternativeAlgorithm);
+        }
+      } else {
+        // For non-audio files, use the standard approach
+        message = await decodeMessage(image, algorithm, fileFormat);
+      }
+      
       setDecodedMessage(message);
       
       // Generate hash for verification
@@ -51,14 +94,25 @@ export const StegoDecoder = () => {
       setHash(imageHash);
       setVerified(true);
       
+      // Add to history if user is authenticated
+      if (isAuthenticated) {
+        addHistoryEntry({
+          operation: 'decode',
+          algorithm: algorithm,
+          timestamp: new Date().toISOString(),
+          imageHash: imageHash,
+          fileFormat: fileFormat
+        });
+      }
+      
       toast({
         title: "Decoding successful",
-        description: "The hidden message has been extracted and verified.",
+        description: `The hidden message has been extracted using ${algorithm.toUpperCase()} algorithm and verified.`,
       });
     } catch (error) {
       toast({
         title: "Decoding failed",
-        description: "Could not extract message from this image.",
+        description: `Could not extract message from this ${fileFormat}. Please ensure this file contains hidden data.`,
         variant: "destructive",
       });
     } finally {
@@ -79,10 +133,25 @@ export const StegoDecoder = () => {
             <CardDescription>Select an image containing hidden data</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>File Format</Label>
+              <Select value={fileFormat} onValueChange={handleFileFormatChange}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select file format" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={FileFormat.IMAGE}>Image</SelectItem>
+                  <SelectItem value={FileFormat.AUDIO}>Audio</SelectItem>
+                  <SelectItem value={FileFormat.VIDEO}>Video</SelectItem>
+                  <SelectItem value={FileFormat.PDF}>PDF</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept={getAcceptString(fileFormat)}
               onChange={handleImageUpload}
               className="hidden"
             />
@@ -92,14 +161,121 @@ export const StegoDecoder = () => {
               onClick={() => fileInputRef.current?.click()}
             >
               <Upload className="w-4 h-4 mr-2" />
-              Choose Encoded Image
+              Choose {fileFormat.charAt(0).toUpperCase() + fileFormat.slice(1)}
             </Button>
             
             {image && (
               <div className="rounded-lg overflow-hidden border border-border">
-                <img src={image} alt="Encoded" className="w-full h-auto" />
+                {fileFormat === FileFormat.IMAGE ? (
+                  <img src={image} alt="Encoded" className="w-full h-auto" />
+                ) : fileFormat === FileFormat.AUDIO ? (
+                  <audio src={image} controls className="w-full" />
+                ) : fileFormat === FileFormat.VIDEO ? (
+                  <video src={image} controls className="w-full h-auto" />
+                ) : (
+                  <div className="p-4 text-center">
+                    <FileType className="w-12 h-12 mx-auto mb-2 text-muted-foreground" />
+                    <p>PDF file selected</p>
+                  </div>
+                )}
               </div>
             )}
+            
+            <div className="space-y-3">
+              <TooltipProvider>
+                <RadioGroup
+                  value={algorithm}
+                  onValueChange={(value) => setAlgorithm(value as StegoAlgorithm)}
+                  className="flex flex-col space-y-2"
+                >
+                  {fileFormat === FileFormat.IMAGE ? (
+                    <>
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value={StegoAlgorithm.LSB} id="lsb" />
+                        <Label htmlFor="lsb" className="cursor-pointer">LSB Algorithm</Label>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="w-4 h-4 rounded-full bg-muted flex items-center justify-center text-xs cursor-help">?</div>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="bg-card border border-border shadow-lg">
+                            <p className="w-[200px] text-xs">
+                              Least Significant Bit - Simple but detectable. Best for quick encoding/decoding.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value={StegoAlgorithm.DCT} id="dct" />
+                        <Label htmlFor="dct" className="cursor-pointer">DCT Algorithm</Label>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="w-4 h-4 rounded-full bg-muted flex items-center justify-center text-xs cursor-help">?</div>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="bg-card border border-border shadow-lg">
+                            <p className="w-[200px] text-xs">
+                              Discrete Cosine Transform - More robust and less detectable. Good balance of security and quality.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value={StegoAlgorithm.DWT} id="dwt" />
+                        <Label htmlFor="dwt" className="cursor-pointer">DWT Algorithm</Label>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="w-4 h-4 rounded-full bg-muted flex items-center justify-center text-xs cursor-help">?</div>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="bg-card border border-border shadow-lg">
+                            <p className="w-[200px] text-xs">
+                              Discrete Wavelet Transform - Best quality preservation. Most secure against image processing.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </>
+                  ) : fileFormat === FileFormat.AUDIO ? (
+                    <>
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value={StegoAlgorithm.AUDIO_PHASE} id="audio-phase" />
+                        <Label htmlFor="audio-phase" className="cursor-pointer">Phase Coding</Label>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="w-4 h-4 rounded-full bg-muted flex items-center justify-center text-xs cursor-help">?</div>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="bg-card border border-border shadow-lg">
+                            <p className="w-[200px] text-xs">
+                              Phase Coding - Encodes data in the phase of audio signals. Good for preserving audio quality.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value={StegoAlgorithm.AUDIO_ECHO} id="audio-echo" />
+                        <Label htmlFor="audio-echo" className="cursor-pointer">Echo Hiding</Label>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="w-4 h-4 rounded-full bg-muted flex items-center justify-center text-xs cursor-help">?</div>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="bg-card border border-border shadow-lg">
+                            <p className="w-[200px] text-xs">
+                              Echo Hiding - Uses echoes to encode information. More robust against audio processing.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+                      No specialized algorithms available for this file format yet.
+                      Using generic data embedding techniques.
+                    </div>
+                  )}
+                </RadioGroup>
+              </TooltipProvider>
+            </div>
             
             <Button
               className="w-full gradient-cyber shadow-glow"
