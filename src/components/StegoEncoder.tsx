@@ -236,23 +236,6 @@ export const StegoEncoder = () => {
                           </TooltipContent>
                         </Tooltip>
                       </div>
-                      
-                      <div className="flex items-center space-x-2">
-                        <RadioGroupItem value={StegoAlgorithm.DWT} id="dwt" />
-                        <Label htmlFor="dwt" className="cursor-pointer">DWT</Label>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-6 w-6">
-                              <Lock className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            <p className="w-[200px] text-xs">
-                              Discrete Wavelet Transform - Best quality preservation. Most secure against image processing.
-                            </p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
                     </>
                   ) : fileFormat === FileFormat.AUDIO ? (
                     <>

@@ -39,8 +39,6 @@ export default function Profile() {
         return "Least Significant Bit (LSB)";
       case "dct":
         return "Discrete Cosine Transform (DCT)";
-      case "dwt":
-        return "Discrete Wavelet Transform (DWT)";
       default:
         return algorithm.toUpperCase();
     }
