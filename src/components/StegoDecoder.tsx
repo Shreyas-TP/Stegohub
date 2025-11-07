@@ -1,10 +1,13 @@
-import { useState, useRef } from "react";
-import { Upload, Eye, Lock, CheckCircle2, FileType } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Upload, Eye, Lock, CheckCircle2, FileType, Key, Copy, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { decodeMessage, StegoAlgorithm, FileFormat, getAcceptString } from "@/utils/steganography";
 import { generateHash } from "@/utils/crypto";
+import { decryptWithPassword } from "@/lib/crypto";
+import { createSignedUrl } from "@/lib/uploadFile";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -14,14 +17,111 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 export const StegoDecoder = () => {
   const [image, setImage] = useState<string | null>(null);
   const [decodedMessage, setDecodedMessage] = useState("");
+  const [decryptedMessage, setDecryptedMessage] = useState("");
   const [hash, setHash] = useState<string>("");
   const [isDecoding, setIsDecoding] = useState(false);
   const [verified, setVerified] = useState(false);
   const [algorithm, setAlgorithm] = useState<StegoAlgorithm>(StegoAlgorithm.LSB);
   const [fileFormat, setFileFormat] = useState<FileFormat>(FileFormat.IMAGE);
+  const [isEncrypted, setIsEncrypted] = useState(false);
+  const [password, setPassword] = useState("");
+  const [isDecrypting, setIsDecrypting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
-  const { isAuthenticated, addHistoryEntry } = useAuth();
+  const { isAuthenticated } = useAuth();
+  
+  // Function to load file from signed URL (for history items)
+  const loadFileFromUrl = async (signedUrl: string) => {
+    try {
+      const response = await fetch(signedUrl);
+      const blob = await response.blob();
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setImage(event.target?.result as string);
+      };
+      reader.readAsDataURL(blob);
+    } catch (error) {
+      throw new Error(`Failed to load file: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  };
+  
+  // Expose this function for use in History component
+  useEffect(() => {
+    (window as any).decodeFromHistory = async (storageKey: string, algorithm: string, encrypted: boolean, fileFormat: FileFormat) => {
+      try {
+        const signedUrl = await createSignedUrl(storageKey);
+        const response = await fetch(signedUrl);
+        const blob = await response.blob();
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+          const dataUrl = event.target?.result as string;
+          setImage(dataUrl);
+          setAlgorithm(algorithm as StegoAlgorithm);
+          setFileFormat(fileFormat);
+          setIsEncrypted(encrypted);
+          // Auto-trigger decode after a short delay to ensure image is loaded
+          setTimeout(async () => {
+            setIsDecoding(true);
+            try {
+              let message;
+              if (fileFormat === FileFormat.AUDIO) {
+                try {
+                  message = await decodeMessage(dataUrl, algorithm as StegoAlgorithm, fileFormat);
+                } catch {
+                  const altAlgo = algorithm === 'audio_phase' ? StegoAlgorithm.AUDIO_ECHO : StegoAlgorithm.AUDIO_PHASE;
+                  message = await decodeMessage(dataUrl, altAlgo, fileFormat);
+                  setAlgorithm(altAlgo);
+                }
+              } else {
+                message = await decodeMessage(dataUrl, algorithm as StegoAlgorithm, fileFormat);
+              }
+              
+              setDecodedMessage(message);
+              
+              try {
+                const parsed = JSON.parse(message);
+                if (parsed.salt && parsed.iv && parsed.ciphertext) {
+                  setIsEncrypted(true);
+                } else {
+                  setIsEncrypted(false);
+                  setDecryptedMessage(message);
+                }
+              } catch {
+                setIsEncrypted(false);
+                setDecryptedMessage(message);
+              }
+              
+              const imageHash = await generateHash(dataUrl);
+              setHash(imageHash);
+              setVerified(true);
+              
+              toast({
+                title: "Decoding successful",
+                description: encrypted 
+                  ? "Encrypted message extracted. Please enter password to decrypt."
+                  : `The hidden message has been extracted using ${algorithm.toUpperCase()} algorithm and verified.`,
+              });
+            } catch (error) {
+              toast({
+                title: "Decoding failed",
+                description: `Could not extract message from this ${fileFormat}.`,
+                variant: "destructive",
+              });
+            } finally {
+              setIsDecoding(false);
+            }
+          }, 500);
+        };
+        reader.readAsDataURL(blob);
+      } catch (error) {
+        toast({
+          title: "Failed to load file",
+          description: error instanceof Error ? error.message : "Unknown error",
+          variant: "destructive",
+        });
+      }
+    };
+  }, []);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -65,6 +165,7 @@ export const StegoDecoder = () => {
     }
 
     setIsDecoding(true);
+    setDecryptedMessage("");
     
     try {
       // For audio files, try both algorithms if the first one fails
@@ -89,25 +190,32 @@ export const StegoDecoder = () => {
       
       setDecodedMessage(message);
       
+      // Check if message is encrypted (JSON format with salt, iv, ciphertext)
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed.salt && parsed.iv && parsed.ciphertext) {
+          setIsEncrypted(true);
+          // Don't set decryptedMessage yet - wait for password
+        } else {
+          setIsEncrypted(false);
+          setDecryptedMessage(message);
+        }
+      } catch {
+        // Not JSON, so not encrypted
+        setIsEncrypted(false);
+        setDecryptedMessage(message);
+      }
+      
       // Generate hash for verification
       const imageHash = await generateHash(image);
       setHash(imageHash);
       setVerified(true);
       
-      // Add to history if user is authenticated
-      if (isAuthenticated) {
-        addHistoryEntry({
-          operation: 'decode',
-          algorithm: algorithm,
-          timestamp: new Date().toISOString(),
-          imageHash: imageHash,
-          fileFormat: fileFormat
-        });
-      }
-      
       toast({
         title: "Decoding successful",
-        description: `The hidden message has been extracted using ${algorithm.toUpperCase()} algorithm and verified.`,
+        description: isEncrypted 
+          ? "Encrypted message extracted. Please enter password to decrypt."
+          : `The hidden message has been extracted using ${algorithm.toUpperCase()} algorithm and verified.`,
       });
     } catch (error) {
       toast({
@@ -118,6 +226,38 @@ export const StegoDecoder = () => {
     } finally {
       setIsDecoding(false);
     }
+  };
+  
+  const handleDecrypt = async () => {
+    if (!password || !isEncrypted) return;
+    
+    setIsDecrypting(true);
+    try {
+      const parsed = JSON.parse(decodedMessage);
+      const decrypted = await decryptWithPassword(password, parsed);
+      setDecryptedMessage(decrypted);
+      toast({
+        title: "Decryption successful",
+        description: "Message decrypted successfully.",
+      });
+    } catch (error) {
+      toast({
+        title: "Decryption failed",
+        description: "Incorrect password or decryption error.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsDecrypting(false);
+    }
+  };
+  
+  const handleCopy = () => {
+    const textToCopy = decryptedMessage || decodedMessage;
+    navigator.clipboard.writeText(textToCopy);
+    toast({
+      title: "Copied to clipboard",
+      description: "Message copied successfully.",
+    });
   };
 
   return (
@@ -284,20 +424,69 @@ export const StegoDecoder = () => {
           <CardContent className="space-y-4">
             {decodedMessage ? (
               <>
-                <div className="p-4 rounded-lg bg-muted min-h-[150px] font-mono text-sm whitespace-pre-wrap">
-                  {decodedMessage}
-                </div>
-                
-                {verified && (
-                  <div className="p-4 rounded-lg glass space-y-2">
-                    <div className="flex items-center gap-2 text-success">
-                      <CheckCircle2 className="w-5 h-5" />
-                      <span className="text-sm font-medium">Blockchain Verified</span>
+                {isEncrypted && !decryptedMessage ? (
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-lg bg-muted/50 border border-primary/30">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Key className="w-4 h-4 text-primary" />
+                        <span className="text-sm font-medium">Encrypted Message Detected</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mb-3">
+                        This message was encrypted with a password. Please enter the password to decrypt.
+                      </p>
+                      <div className="space-y-2">
+                        <Label htmlFor="decrypt-password">Decryption Password</Label>
+                        <Input
+                          id="decrypt-password"
+                          type="password"
+                          placeholder="Enter password..."
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              handleDecrypt();
+                            }
+                          }}
+                        />
+                        <Button
+                          onClick={handleDecrypt}
+                          disabled={!password || isDecrypting}
+                          className="w-full"
+                        >
+                          {isDecrypting ? "Decrypting..." : "Decrypt Message"}
+                        </Button>
+                      </div>
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      Image integrity confirmed and authenticated
-                    </p>
                   </div>
+                ) : (
+                  <>
+                    <div className="relative">
+                      <div className="p-4 rounded-lg bg-muted min-h-[150px] font-mono text-sm whitespace-pre-wrap">
+                        {decryptedMessage || decodedMessage}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="absolute top-2 right-2"
+                        onClick={handleCopy}
+                        title="Copy to clipboard"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </Button>
+                    </div>
+                    
+                    {verified && (
+                      <div className="p-4 rounded-lg glass space-y-2">
+                        <div className="flex items-center gap-2 text-success">
+                          <CheckCircle2 className="w-5 h-5" />
+                          <span className="text-sm font-medium">Blockchain Verified</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Image integrity confirmed and authenticated
+                        </p>
+                      </div>
+                    )}
+                  </>
                 )}
               </>
             ) : (

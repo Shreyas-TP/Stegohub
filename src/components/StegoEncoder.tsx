@@ -1,11 +1,16 @@
 import { useState, useRef } from "react";
-import { Upload, Download, Lock, AlertCircle, Shield, FileType } from "lucide-react";
+import { Upload, Download, Lock, AlertCircle, Shield, FileType, Key } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { encodeMessage, StegoAlgorithm, FileFormat, getAcceptString } from "@/utils/steganography";
 import { generateHash } from "@/utils/crypto";
+import { encryptWithPassword } from "@/lib/crypto";
+import { uploadFile } from "@/lib/uploadFile";
+import { saveStegoHistory } from "@/lib/history";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -14,24 +19,30 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 export const StegoEncoder = () => {
   const [image, setImage] = useState<string | null>(null);
+  const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [message, setMessage] = useState("");
   const [encodedImage, setEncodedImage] = useState<string | null>(null);
   const [hash, setHash] = useState<string>("");
   const [isEncoding, setIsEncoding] = useState(false);
   const [algorithm, setAlgorithm] = useState<StegoAlgorithm>(StegoAlgorithm.LSB);
   const [fileFormat, setFileFormat] = useState<FileFormat>(FileFormat.IMAGE);
+  const [usePassword, setUsePassword] = useState(true);
+  const [password, setPassword] = useState("");
+  const [uploadedFileId, setUploadedFileId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
-  const { isAuthenticated, addHistoryEntry } = useAuth();
+  const { isAuthenticated, refreshHistory } = useAuth();
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setOriginalFile(file);
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target?.result as string);
         setEncodedImage(null);
         setHash("");
+        setUploadedFileId(null);
       };
       reader.readAsDataURL(file);
     }
@@ -54,32 +65,100 @@ export const StegoEncoder = () => {
       return;
     }
 
+    if (usePassword && !password) {
+      toast({
+        title: "Password required",
+        description: "Please enter a password for encryption.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsEncoding(true);
     
     try {
+      let messageToEncode = message;
+      
+      // Encrypt message if password is provided
+      if (usePassword && password) {
+        const encryptedPayload = await encryptWithPassword(password, message);
+        messageToEncode = JSON.stringify(encryptedPayload);
+      }
+      
       // Encode message into image using selected steganography algorithm
-      const encoded = await encodeMessage(image, message, algorithm, fileFormat);
+      const encoded = await encodeMessage(image, messageToEncode, algorithm, fileFormat);
       setEncodedImage(encoded);
       
       // Generate blockchain-style hash
       const imageHash = await generateHash(encoded);
       setHash(imageHash);
       
-      // Add to history if user is authenticated
+      // Upload to Supabase if authenticated
       if (isAuthenticated) {
-        addHistoryEntry({
-          operation: 'encode',
-          algorithm: algorithm,
-          imageHash: imageHash,
-          fileFormat: fileFormat,
-          timestamp: new Date().toISOString()
+        try {
+          // Convert data URL to Blob
+          const response = await fetch(encoded);
+          const blob = await response.blob();
+          
+          // Determine file extension
+          let extension = "png";
+          if (fileFormat === FileFormat.AUDIO) extension = "wav";
+          else if (fileFormat === FileFormat.VIDEO) extension = "mp4";
+          else if (fileFormat === FileFormat.PDF) extension = "pdf";
+          
+          const encodedFile = new File([blob], `encoded_${Date.now()}.${extension}`, {
+            type: blob.type || (fileFormat === FileFormat.IMAGE ? 'image/png' : 'application/octet-stream')
+          });
+          
+          // Upload encoded file
+          const stegoFileRow = await uploadFile(encodedFile);
+          setUploadedFileId(stegoFileRow.id);
+          
+          // Upload original file if available
+          let originalFileId: string | null = null;
+          if (originalFile) {
+            try {
+              const originalFileRow = await uploadFile(originalFile);
+              originalFileId = originalFileRow.id;
+            } catch (err) {
+              console.warn('Failed to upload original file:', err);
+            }
+          }
+          
+          // Save history
+          await saveStegoHistory({
+            original_file_id: originalFileId,
+            stego_file_id: stegoFileRow.id,
+            algorithm: algorithm,
+            encrypted: usePassword && !!password,
+            metadata: {
+              filename: encodedFile.name,
+              hash: imageHash,
+              fileFormat: fileFormat
+            }
+          });
+          
+          // Refresh history in context
+          await refreshHistory();
+          
+          toast({
+            title: "Encoding successful",
+            description: `Your message has been hidden using ${algorithm.toUpperCase()} algorithm, ${usePassword ? 'encrypted, ' : ''}uploaded, and saved to history.`,
+          });
+        } catch (uploadError) {
+          console.error('Upload failed:', uploadError);
+          toast({
+            title: "Encoding successful (upload failed)",
+            description: `Message encoded but upload failed: ${uploadError instanceof Error ? uploadError.message : "Unknown error"}`,
+            variant: "destructive",
+          });
+        }
+      } else {
+        toast({
+          title: "Encoding successful",
+          description: `Your message has been hidden using ${algorithm.toUpperCase()} algorithm and verified.`,
         });
       }
-      
-      toast({
-        title: "Encoding successful",
-        description: `Your message has been hidden using ${algorithm.toUpperCase()} algorithm and verified.`,
-      });
     } catch (error) {
       toast({
         title: "Encoding failed",
@@ -192,6 +271,54 @@ export const StegoEncoder = () => {
               onChange={(e) => setMessage(e.target.value)}
               className="min-h-[150px] resize-none"
             />
+            
+            <div className="space-y-3">
+  <div className="flex items-center justify-between space-x-2">
+    <div className="flex items-center space-x-2">
+      <Switch
+        id="encrypt-password"
+        checked={usePassword}
+        onCheckedChange={setUsePassword}
+      />
+      <Label htmlFor="encrypt-password" className="flex items-center gap-2 cursor-pointer">
+        <Key className="w-4 h-4" />
+        <span>Encrypt message with password <span className="text-sm text-muted-foreground">(recommended)</span></span>
+      </Label>
+    </div>
+  </div>
+
+  {usePassword ? (
+    <div className="space-y-2">
+      <Label htmlFor="password">Encryption Password</Label>
+      <Input
+        id="password"
+        type="password"
+        placeholder="Enter password..."
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        required={usePassword}
+      />
+      <p className="text-xs text-muted-foreground">
+        Your message will be encrypted with AES-GCM before encoding.
+      </p>
+    </div>
+  ) : (
+    <div className="rounded-md border border-red-200 bg-red-50/50 p-3">
+      <div className="flex items-start gap-2">
+        <svg className="w-5 h-5 text-red-600" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+          <path d="M12 9v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M12 17h.01" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        <div>
+          <div className="text-sm font-medium text-red-700">Encryption is disabled</div>
+          <div className="text-xs text-red-600">⚠ Warning: Encryption is OFF. Your hidden message will not be protected by a password.</div>
+        </div>
+      </div>
+    </div>
+  )}
+</div>
+
             
             <div className="space-y-3">
               <Label className="text-sm font-medium">Encoding Algorithm</Label>
